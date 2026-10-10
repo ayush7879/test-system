@@ -1,0 +1,12 @@
+ayushpersonal2003_db_user
+
+jmPT4sThfCi3ztvS
+
+
+mongodb+srv://<db_username>:jmPT4sThfCi3ztvS@cluster0.qjyrfmo.mongodb.net/?appName=Cluster0
+
+
+
+admin credential
+email-hello@gmail.com
+password- hello@123
