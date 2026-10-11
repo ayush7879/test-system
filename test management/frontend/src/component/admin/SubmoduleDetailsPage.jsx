@@ -2,8 +2,9 @@ import PageHeader from "./PageHeader";
 import TestSummary from "./TestSummary";
 import { formatNumber, summarizeProject } from "./projectData";
 import TestCasesPanel from "./TestCasesPanel";
+import AssignmentPanel from "./AssignmentPanel";
 
-export default function SubmoduleDetailsPage({ project, module, onBack, onAddTestCases, onUpdateTestCase, isSaving }) {
+export default function SubmoduleDetailsPage({ project, module, onBack, onAddTestCases, onUpdateTestCase, onAssignmentSaved, isSaving }) {
   const summary = summarizeProject({ modules: [module] });
 
   return (
@@ -16,6 +17,7 @@ export default function SubmoduleDetailsPage({ project, module, onBack, onAddTes
         <article className="dashboard-stat"><span className="stat-icon stat-lead">✓</span><div><p>Pass rate</p><strong>{summary.passRate}%</strong></div></article>
       </section>
       <TestSummary summary={summary} title={`${module.name} test summary`} />
+      <AssignmentPanel project={project} module={module} token={localStorage.getItem("token")} onAssigned={onAssignmentSaved} />
       <TestCasesPanel
         module={module}
         isSaving={isSaving}

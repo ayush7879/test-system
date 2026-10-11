@@ -10,3 +10,7 @@ mongodb+srv://<db_username>:jmPT4sThfCi3ztvS@cluster0.qjyrfmo.mongodb.net/?appNa
 admin credential
 email-hello@gmail.com
 password- hello@123
+
+tester credential
+ayushpersonalwork19@gmail.com
+ayush123

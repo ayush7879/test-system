@@ -1,5 +1,9 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 const { body, validationResult } = require('express-validator');
 const ActivityLog = require('../model/ActivityLog');
 const Attachment = require('../model/Attachment');
@@ -14,6 +18,20 @@ const fetchUser = require('../middleware/fetchUser');
 const router = express.Router();
 const testCaseStatuses = ['Not run', 'Pass', 'Fail', 'Blocked'];
 const testPriorities = ['Low', 'Medium', 'High', 'Critical'];
+const uploadDirectory = path.resolve(__dirname, '..', 'uploads');
+fs.mkdirSync(uploadDirectory, { recursive: true });
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: uploadDirectory,
+    filename: (req, file, callback) => callback(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase()}`),
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 },
+  fileFilter: (req, file, callback) => {
+    const allowed = /^(image\/(png|jpeg|gif|webp)|video\/(mp4|webm)|text\/(plain|csv)|application\/(pdf|json|zip|octet-stream))$/i;
+    if (allowed.test(file.mimetype)) return callback(null, true);
+    return callback(new Error('Upload a PNG/JPEG image, MP4/WebM video, PDF, CSV, text, or log file'));
+  },
+});
 
 function validationErrors(req, res) {
   const errors = validationResult(req);
@@ -24,6 +42,15 @@ function validationErrors(req, res) {
 
 function validId(value) {
   return mongoose.isValidObjectId(value);
+}
+
+function isTester(user) {
+  return String(user?.role || '').toLowerCase() === 'tester';
+}
+
+async function requireTester(req, res, next) {
+  if (!isTester(req.workspaceUser)) return res.status(403).json({ success: false, message: 'A Tester account is required' });
+  return next();
 }
 
 async function requireAdmin(req, res, next) {
@@ -66,20 +93,30 @@ function serializeTestCase(testCase) {
     id: String(testCase._id),
     caseId: testCase.caseId,
     title: testCase.title,
+    testType: testCase.testType || 'Functional',
+    preconditions: testCase.preconditions || '',
+    testType: testCase.testType || 'Functional',
+    preconditions: testCase.preconditions || '',
     steps: testCase.steps,
     expectedResult: testCase.expectedResult,
     testData: testCase.testData,
     priority: testCase.priority,
     status: testCase.status,
+    assignedTester: testCase.assignedTester ? String(testCase.assignedTester._id || testCase.assignedTester) : null,
+    assignedTesterName: testCase.assignedTester?.name || '',
+    assignedAt: testCase.assignedAt,
     createdAt: testCase.createdAt,
     updatedAt: testCase.updatedAt,
   };
 }
 
-async function serializeProject(project) {
+async function serializeProject(project, requestingUser) {
   const submodules = await Submodule.find({ project: project._id }).sort({ createdAt: 1 }).lean();
   const modules = await Promise.all(submodules.map(async (submodule) => {
-    const cases = await TestCase.find({ submodule: submodule._id }).sort({ createdAt: 1 }).lean();
+    const caseFilter = String(requestingUser?.role || '').toLowerCase() === 'admin'
+      ? { submodule: submodule._id }
+      : { submodule: submodule._id, assignedTester: requestingUser?._id };
+    const cases = await TestCase.find(caseFilter).populate('assignedTester', 'name').sort({ createdAt: 1 }).lean();
     const summary = {
       pass: submodule.summary?.pass || 0,
       fail: submodule.summary?.fail || 0,
@@ -87,7 +124,7 @@ async function serializeProject(project) {
       notRun: submodule.summary?.notRun || 0,
     };
     cases.forEach((testCase) => {
-      const key = testCase.status === 'Not run' ? 'notRun' : testCase.status.toLowerCase();
+      const key = ['Not run', 'In Progress'].includes(testCase.status) ? 'notRun' : testCase.status.toLowerCase();
       summary[key] += 1;
     });
     return {
@@ -139,9 +176,10 @@ router.get('/roles', requireAdmin, async (req, res) => {
 router.get('/projects', async (req, res) => {
   try {
     const isAdmin = String(req.workspaceUser.role || '').toLowerCase() === 'admin';
-    const filter = isAdmin ? { owner: req.workspaceUser._id } : { status: 'Active' };
+    const assignedProjects = isAdmin ? null : await TestCase.distinct('project', { assignedTester: req.workspaceUser._id });
+    const filter = isAdmin ? { owner: req.workspaceUser._id } : { _id: { $in: assignedProjects }, status: 'Active' };
     const projects = await Project.find(filter).sort({ updatedAt: -1 });
-    return res.json({ success: true, projects: await Promise.all(projects.map(serializeProject)) });
+    return res.json({ success: true, projects: await Promise.all(projects.map((project) => serializeProject(project, req.workspaceUser))) });
   } catch (error) {
     console.error('Loading projects failed:', error.message);
     return res.status(500).json({ success: false, message: 'Unable to load projects' });
@@ -290,6 +328,8 @@ router.post('/submodules/:submoduleId/testcases', [
       submodule: submodule._id,
       caseId: testCase.caseId || `TC-${String(existingCount + index + 1).padStart(4, '0')}`,
       title: testCase.title.trim(),
+      testType: testCase.testType || 'Functional',
+      preconditions: testCase.preconditions || '',
       steps: testCase.steps || '',
       expectedResult: testCase.expectedResult || '',
       testData: testCase.testData ?? null,
@@ -310,6 +350,8 @@ router.post('/submodules/:submoduleId/testcases', [
 router.patch('/testcases/:testCaseId', [
   requireAdmin,
   body('title').optional().trim().isLength({ min: 1 }).withMessage('Test case title cannot be blank'),
+  body('testType').optional().isString(),
+  body('preconditions').optional().isString(),
   body('priority').optional().isIn(testPriorities),
   body('status').optional().isIn(testCaseStatuses),
   body('steps').optional().isString(),
@@ -320,7 +362,7 @@ router.patch('/testcases/:testCaseId', [
     const testCase = validId(req.params.testCaseId) ? await TestCase.findById(req.params.testCaseId) : null;
     if (!testCase || !(await ownedProject(testCase.project, req.workspaceUser._id))) return res.status(404).json({ success: false, message: 'Test case not found' });
     const before = {};
-    for (const field of ['title', 'steps', 'expectedResult', 'testData', 'priority', 'status']) {
+    for (const field of ['title', 'testType', 'preconditions', 'steps', 'expectedResult', 'testData', 'priority', 'status']) {
       if (req.body[field] !== undefined) {
         before[field] = testCase[field];
         testCase[field] = req.body[field];
@@ -349,17 +391,168 @@ router.delete('/testcases/:testCaseId', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/testexecutions', [
+router.get('/projects/:projectId/testers', requireAdmin, async (req, res) => {
+  try {
+    const project = await ownedProject(req.params.projectId, req.workspaceUser._id);
+    if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
+    const testers = await User.find({ role: /^tester$/i, mustChangePassword: false, isActive: { $ne: false } }, 'name email role')
+      .sort({ name: 1 })
+      .lean();
+    return res.json({ success: true, testers: testers.map((tester) => ({ id: String(tester._id), name: tester.name, email: tester.email, role: tester.role })) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to load testers' });
+  }
+});
+
+router.post('/submodules/:submoduleId/assignments', requireAdmin, [
+  body('testCaseIds').isArray({ min: 1 }).withMessage('Select at least one test case'),
+  body('testCaseIds.*').isMongoId(),
+  body('testerIds').isArray({ min: 1 }).withMessage('Select at least one Tester'),
+  body('testerIds.*').isMongoId(),
+], async (req, res) => {
+  if (validationErrors(req, res)) return;
+  try {
+    const submodule = validId(req.params.submoduleId) ? await Submodule.findById(req.params.submoduleId) : null;
+    const project = submodule && await ownedProject(submodule.project, req.workspaceUser._id);
+    if (!submodule || !project) return res.status(404).json({ success: false, message: 'Submodule not found' });
+
+    const testCaseIds = [...new Set(req.body.testCaseIds.map(String))];
+    const testerIds = [...new Set(req.body.testerIds.map(String))];
+    const foundCases = await TestCase.find({ _id: { $in: testCaseIds }, project: project._id, submodule: submodule._id });
+    if (foundCases.length !== testCaseIds.length) return res.status(400).json({ success: false, message: 'Some selected test cases do not belong to this submodule' });
+    const casesById = new Map(foundCases.map((testCase) => [String(testCase._id), testCase]));
+    const cases = testCaseIds.map((id) => casesById.get(id));
+
+    const testers = await User.find({ _id: { $in: testerIds }, role: /^tester$/i, mustChangePassword: false, isActive: { $ne: false } }, '_id name email').lean();
+    if (testers.length !== testerIds.length) return res.status(400).json({ success: false, message: 'Choose active Tester accounts only' });
+    testers.sort((left, right) => testerIds.indexOf(String(left._id)) - testerIds.indexOf(String(right._id)));
+    const testerMap = new Map(testers.map((tester) => [String(tester._id), tester]));
+    const groups = testers.map((tester) => ({ testerId: String(tester._id), testerName: tester.name, testerEmail: tester.email, testCaseIds: [] }));
+    const baseSize = Math.floor(cases.length / testers.length);
+    const remainder = cases.length % testers.length;
+    let caseIndex = 0;
+
+    for (let testerIndex = 0; testerIndex < testers.length; testerIndex += 1) {
+      const groupSize = baseSize + (testerIndex < remainder ? 1 : 0);
+      const group = groups[testerIndex];
+      for (let offset = 0; offset < groupSize; offset += 1) {
+        const testCase = cases[caseIndex++];
+        testCase.assignedTester = testerMap.get(group.testerId)._id;
+        testCase.assignedAt = new Date();
+        testCase.assignedBy = req.workspaceUser._id;
+        testCase.status = 'Not run';
+        testCase.updatedBy = req.workspaceUser._id;
+        group.testCaseIds.push(String(testCase._id));
+        await testCase.save();
+      }
+    }
+
+    await writeActivity({ actor: req.workspaceUser._id, action: 'assigned', entityType: 'TestCase', project: project._id, details: { submodule: submodule.name, groups: groups.map(({ testerId, testCaseIds: assignedIds }) => ({ testerId, count: assignedIds.length, testCaseIds: assignedIds })) } });
+    return res.json({ success: true, assignments: groups });
+  } catch (error) {
+    console.error('Assigning test cases failed:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to assign test cases' });
+  }
+});
+
+router.get('/tester/dashboard', requireTester, async (req, res) => {
+  try {
+    const cases = await TestCase.find({ assignedTester: req.workspaceUser._id }).lean();
+    const assigned = cases.length;
+    const inProgress = cases.filter((testCase) => testCase.status === 'In Progress').length;
+    const completed = cases.filter((testCase) => ['Pass', 'Fail', 'Blocked'].includes(testCase.status)).length;
+    return res.json({ success: true, tester: { id: String(req.workspaceUser._id), name: req.workspaceUser.name, email: req.workspaceUser.email }, stats: { assigned, inProgress, completed }, cases: cases.map((testCase) => String(testCase._id)) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to load Tester dashboard' });
+  }
+});
+
+router.get('/tester/tests', requireTester, async (req, res) => {
+  try {
+    const cases = await TestCase.find({ assignedTester: req.workspaceUser._id })
+      .populate('project', 'name code')
+      .populate('submodule', 'name')
+      .sort({ assignedAt: -1, createdAt: 1 });
+    const caseIds = cases.map((testCase) => testCase._id);
+    const executions = await TestExecution.find({ testCase: { $in: caseIds } }).sort({ executedAt: -1 }).lean();
+    const latestExecution = new Map();
+    executions.forEach((execution) => {
+      const key = String(execution.testCase);
+      if (!latestExecution.has(key)) latestExecution.set(key, execution);
+    });
+    return res.json({ success: true, testCases: cases.map((testCase) => ({
+      ...serializeTestCase(testCase),
+      project: testCase.project ? { id: String(testCase.project._id), name: testCase.project.name, code: testCase.project.code } : null,
+      submodule: testCase.submodule ? { id: String(testCase.submodule._id), name: testCase.submodule.name } : null,
+      latestExecution: latestExecution.get(String(testCase._id)) || null,
+    })) });
+  } catch (error) {
+    console.error('Loading assigned test cases failed:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to load assigned test cases' });
+  }
+});
+
+router.get('/tester/executions', requireTester, async (req, res) => {
+  try {
+    const executions = await TestExecution.find({ tester: req.workspaceUser._id })
+      .populate('project', 'name code')
+      .populate('testCase', 'caseId title')
+      .sort({ executedAt: -1 })
+      .limit(200)
+      .lean();
+    return res.json({ success: true, executions });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to load your test runs' });
+  }
+});
+
+router.get('/tester/attachments', requireTester, async (req, res) => {
+  try {
+    const attachments = await Attachment.find({ uploadedBy: req.workspaceUser._id })
+      .populate('project', 'name code')
+      .populate('testCase', 'caseId title')
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean();
+    return res.json({ success: true, attachments });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to load your evidence files' });
+  }
+});
+
+router.post('/testcases/:testCaseId/start', requireTester, async (req, res) => {
+  try {
+    const testCase = validId(req.params.testCaseId) ? await TestCase.findOne({ _id: req.params.testCaseId, assignedTester: req.workspaceUser._id }) : null;
+    if (!testCase) return res.status(404).json({ success: false, message: 'This test case is not assigned to your account' });
+    testCase.status = 'In Progress';
+    testCase.updatedBy = req.workspaceUser._id;
+    await testCase.save();
+    await writeActivity({ actor: req.workspaceUser._id, action: 'started', entityType: 'TestCase', entityId: testCase._id, project: testCase.project, details: { caseId: testCase.caseId } });
+    return res.json({ success: true, testCase: serializeTestCase(testCase) });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to start test case' });
+  }
+});
+
+router.post('/testexecutions', requireTester, [
   body('testCaseId').isMongoId(),
   body('result').isIn(['Pass', 'Fail', 'Blocked']),
   body('actualResult').optional().isString(),
   body('comments').optional().isString(),
+  body('durationSeconds').optional().isInt({ min: 0 }),
+  body('attachmentIds').optional().isArray(),
 ], async (req, res) => {
   if (validationErrors(req, res)) return;
   try {
     const testCase = await TestCase.findById(req.body.testCaseId);
     const project = testCase && await activeProject(testCase.project);
-    if (!testCase || !project) return res.status(404).json({ success: false, message: 'Test case not found' });
+    if (!testCase || !project || String(testCase.assignedTester) !== String(req.workspaceUser._id)) {
+      return res.status(404).json({ success: false, message: 'This test case is not assigned to your account' });
+    }
+    const attachmentIds = [...new Set((req.body.attachmentIds || []).map(String))];
+    if (attachmentIds.length && await Attachment.countDocuments({ _id: { $in: attachmentIds }, testCase: testCase._id }) !== attachmentIds.length) {
+      return res.status(400).json({ success: false, message: 'One or more evidence files do not belong to this test case' });
+    }
     const execution = await TestExecution.create({
       project: testCase.project,
       submodule: testCase.submodule,
@@ -370,6 +563,7 @@ router.post('/testexecutions', [
       tester: req.workspaceUser._id,
       durationSeconds: req.body.durationSeconds,
     });
+    if (attachmentIds.length) await Attachment.updateMany({ _id: { $in: attachmentIds } }, { $set: { execution: execution._id } });
     testCase.status = execution.result;
     testCase.updatedBy = req.workspaceUser._id;
     await testCase.save();
@@ -385,10 +579,63 @@ router.get('/projects/:projectId/testexecutions', async (req, res) => {
   try {
     const project = await activeProject(req.params.projectId);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
-    const executions = await TestExecution.find({ project: project._id }).populate('testCase', 'caseId title').populate('tester', 'name email').sort({ executedAt: -1 }).lean();
+    const isAdmin = String(req.workspaceUser.role || '').toLowerCase() === 'admin';
+    const assignedCases = isAdmin ? null : await TestCase.find({ project: project._id, assignedTester: req.workspaceUser._id }, '_id').lean();
+    const executionFilter = isAdmin ? { project: project._id } : { project: project._id, tester: req.workspaceUser._id, testCase: { $in: assignedCases.map((item) => item._id) } };
+    const executions = await TestExecution.find(executionFilter).populate('testCase', 'caseId title').populate('tester', 'name email').sort({ executedAt: -1 }).lean();
     return res.json({ success: true, executions });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Unable to load test executions' });
+  }
+});
+
+router.post('/attachments/upload', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ success: false, message: 'Select an evidence file to upload' });
+  try {
+    const project = await activeProject(req.body.projectId);
+    const testCase = validId(req.body.testCaseId) ? await TestCase.findOne({ _id: req.body.testCaseId, project: project?._id }) : null;
+    if (!project || !testCase) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(404).json({ success: false, message: 'Active project or test case not found' });
+    }
+    const isAdmin = String(req.workspaceUser.role || '').toLowerCase() === 'admin';
+    if (!isAdmin && String(testCase.assignedTester) !== String(req.workspaceUser._id)) {
+      await fs.promises.unlink(req.file.path).catch(() => {});
+      return res.status(403).json({ success: false, message: 'This test case is not assigned to your account' });
+    }
+    const attachment = await Attachment.create({
+      project: project._id,
+      submodule: testCase.submodule,
+      testCase: testCase._id,
+      originalName: req.file.originalname,
+      storageKey: path.basename(req.file.filename),
+      mimeType: req.file.mimetype,
+      sizeBytes: req.file.size,
+      uploadedBy: req.workspaceUser._id,
+    });
+    await writeActivity({ actor: req.workspaceUser._id, action: 'uploaded-evidence', entityType: 'Attachment', entityId: attachment._id, project: project._id, details: { originalName: attachment.originalName, testCaseId: String(testCase._id) } });
+    return res.status(201).json({ success: true, attachment: { id: String(attachment._id), originalName: attachment.originalName, mimeType: attachment.mimeType, sizeBytes: attachment.sizeBytes } });
+  } catch (error) {
+    await fs.promises.unlink(req.file.path).catch(() => {});
+    console.error('Evidence upload failed:', error.message);
+    return res.status(500).json({ success: false, message: 'Unable to save evidence file' });
+  }
+});
+
+router.get('/attachments/:attachmentId/file', async (req, res) => {
+  try {
+    const attachment = validId(req.params.attachmentId) ? await Attachment.findById(req.params.attachmentId) : null;
+    if (!attachment) return res.status(404).json({ success: false, message: 'Evidence file not found' });
+    const isAdmin = String(req.workspaceUser.role || '').toLowerCase() === 'admin';
+    const isUploader = String(attachment.uploadedBy) === String(req.workspaceUser._id);
+    const testCase = attachment.testCase ? await TestCase.findById(attachment.testCase) : null;
+    const isAssignedTester = testCase && String(testCase.assignedTester) === String(req.workspaceUser._id);
+    if (!isAdmin && !isUploader && !isAssignedTester) return res.status(403).json({ success: false, message: 'You do not have access to this evidence file' });
+    const filePath = path.join(uploadDirectory, path.basename(attachment.storageKey));
+    if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'Evidence file is no longer available on this server' });
+    return res.download(filePath, attachment.originalName);
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Unable to retrieve evidence file' });
   }
 });
 
@@ -440,7 +687,9 @@ router.get('/projects/:projectId/attachments', async (req, res) => {
   try {
     const project = await activeProject(req.params.projectId);
     if (!project) return res.status(404).json({ success: false, message: 'Project not found' });
-    const attachments = await Attachment.find({ project: project._id }).populate('uploadedBy', 'name email').sort({ createdAt: -1 }).lean();
+    const isAdmin = String(req.workspaceUser.role || '').toLowerCase() === 'admin';
+    const filter = isAdmin ? { project: project._id } : { project: project._id, uploadedBy: req.workspaceUser._id };
+    const attachments = await Attachment.find(filter).populate('uploadedBy', 'name email').sort({ createdAt: -1 }).lean();
     return res.json({ success: true, attachments });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Unable to load attachments' });

@@ -223,7 +223,7 @@ export default function AdminDashboard({ user, onSignOut }) {
 
   let pageContent;
   if (selectedProject && selectedModule) {
-    pageContent = <SubmoduleDetailsPage project={selectedProject} module={selectedModule} onBack={() => setSelectedModuleId(null)} onAddTestCases={addTestCases} onUpdateTestCase={updateTestCase} isSaving={isLoadingProjectChange} />;
+    pageContent = <SubmoduleDetailsPage project={selectedProject} module={selectedModule} onBack={() => setSelectedModuleId(null)} onAddTestCases={addTestCases} onUpdateTestCase={updateTestCase} onAssignmentSaved={reloadProjects} isSaving={isLoadingProjectChange} />;
   } else if (selectedProject) {
     pageContent = <ProjectDetailsPage project={selectedProject} onBack={() => setSelectedProjectId(null)} onSelectModule={selectModule} onCreateModule={createModule} isSaving={isLoadingProjectChange} />;
   } else {

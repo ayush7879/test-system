@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import AdminDashboard from "./admin/AdminDashboard";
+import TesterDashboard from "./admin/TesterDashboard";
 import apiRequest from "./admin/apiRequest";
 
 const emptyCredentials = { email: "", password: "" };
@@ -89,6 +90,10 @@ export default function Login() {
 
   if (user?.role?.toLowerCase() === "admin" && !user.mustChangePassword) {
     return <AdminDashboard user={user} onSignOut={signOut} />;
+  }
+
+  if (user?.role?.toLowerCase() === "tester" && !user.mustChangePassword) {
+    return <TesterDashboard user={user} onSignOut={signOut} />;
   }
 
   return (

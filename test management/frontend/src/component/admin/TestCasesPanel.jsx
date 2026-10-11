@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import { formatNumber } from "./projectData";
 
 const statuses = ["Not run", "Pass", "Fail", "Blocked"];
-const emptyCase = { title: "", steps: "", expectedResult: "", testData: "", priority: "Medium" };
+const emptyCase = { title: "", testType: "Functional", preconditions: "", steps: "", expectedResult: "", testData: "", priority: "Medium" };
 
 function normalizeHeader(value) {
   return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -49,6 +49,8 @@ function parseSheetRows(rows) {
   }
 
   const findIndex = (...names) => headers.findIndex((header) => names.includes(header));
+  const typeIndex = findIndex("type", "testtype", "category");
+  const preconditionsIndex = findIndex("preconditions", "prerequisites", "setup");
   const stepsIndex = findIndex("steps", "teststeps", "procedure", "action");
   const expectedIndex = findIndex("expectedresult", "expected", "result");
   const testDataIndex = findIndex("testdata", "data", "inputdata");
@@ -65,6 +67,8 @@ function parseSheetRows(rows) {
       id: `case-${crypto.randomUUID()}`,
       caseId: `TC-${Date.now().toString().slice(-6)}-${index + 1}`,
       title,
+      testType: typeIndex < 0 ? "Functional" : String(row[typeIndex] || "Functional").trim(),
+      preconditions: preconditionsIndex < 0 ? "" : String(row[preconditionsIndex] || "").trim(),
       steps: stepsIndex < 0 ? "" : String(row[stepsIndex] || "").trim(),
       expectedResult: expectedIndex < 0 ? "" : String(row[expectedIndex] || "").trim(),
       testData: testDataIndex < 0 ? "" : String(row[testDataIndex] || "").trim(),
@@ -114,7 +118,7 @@ export default function TestCasesPanel({ module, onAddTestCases, onUpdateTestCas
 
   const startEditing = (item) => {
     setEditingCaseId(item.id);
-    setEditForm({ title: item.title, steps: item.steps || "", expectedResult: item.expectedResult || "", testData: item.testData || "", priority: item.priority || "Medium", status: item.status || "Not run" });
+    setEditForm({ title: item.title, testType: item.testType || "Functional", preconditions: item.preconditions || "", steps: item.steps || "", expectedResult: item.expectedResult || "", testData: item.testData || "", priority: item.priority || "Medium", status: item.status || "Not run" });
     setFeedback("");
   };
 
@@ -177,6 +181,8 @@ export default function TestCasesPanel({ module, onAddTestCases, onUpdateTestCas
       {entryMode === "manual" ? (
         <form className="manual-case-form" onSubmit={addTestCase}>
           <div className="input-group"><label htmlFor="case-title">Test case title</label><input id="case-title" value={testCase.title} onChange={(event) => setTestCase({ ...testCase, title: event.target.value })} placeholder="e.g. User can complete checkout" required /></div>
+          <div className="input-group"><label htmlFor="case-type">Test type</label><select id="case-type" value={testCase.testType} onChange={(event) => setTestCase({ ...testCase, testType: event.target.value })}><option>Functional</option><option>Regression</option><option>Smoke</option><option>Integration</option><option>Performance</option><option>Security</option><option>Usability</option></select></div>
+          <div className="input-group"><label htmlFor="case-preconditions">Preconditions</label><textarea id="case-preconditions" rows="2" value={testCase.preconditions} onChange={(event) => setTestCase({ ...testCase, preconditions: event.target.value })} placeholder="Required state before running" /></div>
           <div className="input-group"><label htmlFor="case-steps">Test steps</label><textarea id="case-steps" rows="3" value={testCase.steps} onChange={(event) => setTestCase({ ...testCase, steps: event.target.value })} placeholder="One step per line" /></div>
           <div className="input-group"><label htmlFor="case-expected">Expected result</label><textarea id="case-expected" rows="2" value={testCase.expectedResult} onChange={(event) => setTestCase({ ...testCase, expectedResult: event.target.value })} placeholder="What should happen?" /></div>
           <div className="input-group"><label htmlFor="case-test-data">Test data</label><textarea id="case-test-data" rows="2" value={testCase.testData} onChange={(event) => setTestCase({ ...testCase, testData: event.target.value })} placeholder="Optional input data" /></div>
@@ -187,13 +193,13 @@ export default function TestCasesPanel({ module, onAddTestCases, onUpdateTestCas
         <div className="excel-upload-panel">
           <div className="excel-upload-icon">⇧</div>
           <h3>Import test cases from Excel</h3>
-          <p>Upload .xlsx or .csv. Include a <strong>Title</strong> column; optional columns: Steps, Expected Result, Test Data, Priority, Status.</p>
+          <p>Upload .xlsx or .csv. Include a <strong>Title</strong> column; optional columns: Type, Preconditions, Steps, Expected Result, Test Data, Priority, Status.</p>
           <input ref={fileInput} className="visually-hidden-file" type="file" accept=".xlsx,.csv" onChange={importWorkbook} />
           <button type="button" className="dashboard-primary-action" onClick={() => fileInput.current?.click()} disabled={isSaving || isUploading}>{isSaving || isUploading ? "Importing…" : "Choose spreadsheet"}</button>
           <button type="button" className="inline-link template-download" onClick={() => {
             const csv = [
-              ["Title", "Steps", "Expected Result", "Test Data", "Priority", "Status"],
-              ["User can sign in", "Open sign in page; enter valid credentials", "User is taken to the dashboard", "qa@example.com", "High", "Not run"],
+              ["Title", "Type", "Preconditions", "Steps", "Expected Result", "Test Data", "Priority", "Status"],
+              ["User can sign in", "Functional", "A valid user account exists", "Open sign in page; enter valid credentials", "User is taken to the dashboard", "qa@example.com", "High", "Not run"],
             ].map((row) => row.map((value) => `"${value.replaceAll('"', '""')}"`).join(",")).join("\r\n");
             const downloadUrl = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
             const link = document.createElement("a");
@@ -213,6 +219,8 @@ export default function TestCasesPanel({ module, onAddTestCases, onUpdateTestCas
             {editingCaseId === item.id ? (
               <form className="edit-case-form" onSubmit={saveEdit}>
                 <div className="input-group"><label htmlFor={`edit-title-${item.id}`}>Test case title</label><input id={`edit-title-${item.id}`} value={editForm.title} onChange={(event) => setEditForm({ ...editForm, title: event.target.value })} required /></div>
+                <div className="input-group"><label htmlFor={`edit-type-${item.id}`}>Test type</label><select id={`edit-type-${item.id}`} value={editForm.testType || "Functional"} onChange={(event) => setEditForm({ ...editForm, testType: event.target.value })}><option>Functional</option><option>Regression</option><option>Smoke</option><option>Integration</option><option>Performance</option><option>Security</option><option>Usability</option></select></div>
+                <div className="input-group"><label htmlFor={`edit-preconditions-${item.id}`}>Preconditions</label><textarea id={`edit-preconditions-${item.id}`} rows="2" value={editForm.preconditions || ""} onChange={(event) => setEditForm({ ...editForm, preconditions: event.target.value })} /></div>
                 <div className="input-group"><label htmlFor={`edit-steps-${item.id}`}>Test steps</label><textarea id={`edit-steps-${item.id}`} rows="2" value={editForm.steps} onChange={(event) => setEditForm({ ...editForm, steps: event.target.value })} /></div>
                 <div className="input-group"><label htmlFor={`edit-expected-${item.id}`}>Expected result</label><textarea id={`edit-expected-${item.id}`} rows="2" value={editForm.expectedResult} onChange={(event) => setEditForm({ ...editForm, expectedResult: event.target.value })} /></div>
                 <div className="input-group"><label htmlFor={`edit-data-${item.id}`}>Test data</label><textarea id={`edit-data-${item.id}`} rows="2" value={editForm.testData || ""} onChange={(event) => setEditForm({ ...editForm, testData: event.target.value })} /></div>

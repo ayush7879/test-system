@@ -2,7 +2,7 @@ export default async function apiRequest(url, options = {}, token = "") {
   const response = await fetch(url, {
     ...options,
     headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.body && !(typeof FormData !== "undefined" && options.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
       ...(token ? { "auth-token": token } : {}),
       ...options.headers,
     },

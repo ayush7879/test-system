@@ -111,23 +111,36 @@ router.post(
         mustChangePassword: true,
       });
 
-      await sendInviteEmail({ name, email, role, temporaryPassword });
-      await ActivityLog.create({
-        actor: req.workspaceUser._id,
-        action: 'invited',
-        entityType: 'User',
-        entityId: invitedUser._id,
-        details: { email, role },
-      }).catch((error) => console.error('Recording invitation activity failed:', error.message));
-      return res.status(201).json({ success: true, message: `Invitation sent to ${email}` });
     } catch (error) {
-      if (invitedUser) await User.deleteOne({ _id: invitedUser._id }).catch(() => {});
-      console.error('Invite delivery failed:', error.message);
+      if (error.code === 11000) {
+        return res.status(409).json({ success: false, message: 'An account with this email already exists' });
+      }
+      console.error('Creating invited user failed:', error.message);
+      return res.status(500).json({ success: false, message: 'Unable to create the invited account' });
+    }
+
+    try {
+      await sendInviteEmail({ name, email, role, temporaryPassword });
+    } catch (error) {
+      await User.deleteOne({ _id: invitedUser._id }).catch((deleteError) => {
+        console.error('Removing undelivered invited account failed:', deleteError.message);
+      });
+      console.error('Invite email delivery failed:', error.message);
       return res.status(503).json({
         success: false,
         message: 'Invitation email could not be sent. Check the SMTP settings and try again.',
       });
     }
+
+    await ActivityLog.create({
+      actor: req.authenticatedUser._id,
+      action: 'invited',
+      entityType: 'User',
+      entityId: invitedUser._id,
+      details: { email, role },
+    }).catch((error) => console.error('Recording invitation activity failed:', error.message));
+
+    return res.status(201).json({ success: true, message: `Invitation sent to ${email}` });
   },
 );
 
@@ -230,5 +243,7 @@ router.post(
     }
   },
 );
+
+
 
 module.exports = router;
